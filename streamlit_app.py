@@ -49,57 +49,167 @@ with tab1:
         placeholder="Example: Smartphone with at least 6GB RAM, 128GB storage, 6.1 inch OLED display, 5G connectivity, IP68 water resistance"
     )
 
+    # NEW FEATURE: Search Domains Configuration
+    st.subheader("Search Domains Configuration")
+
+    # Default search domains
+    default_domains = [
+        "vaistai.lt",
+        "kainos.lt",
+        "kaina24.lt",
+        "gintarine.lt",
+        "eurovaistine.lt",
+        "manovaistine.lt"
+    ]
+
+    # Initialize session state for domains if not already set
+    if "search_domains" not in st.session_state:
+        st.session_state.search_domains = default_domains.copy()
+
+    # Input for adding new domain
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_domain = st.text_input("Add new domain (e.g., example.lt):",
+                                   placeholder="Enter a Lithuanian domain")
+    with col2:
+        if st.button("Add Domain") and new_domain:
+            if new_domain not in st.session_state.search_domains:
+                st.session_state.search_domains.append(new_domain)
+                st.success(f"Added {new_domain} to search domains")
+            else:
+                st.info(f"{new_domain} is already in search domains")
+
+    # Display and manage current domains
+    st.write("Current search domains:")
+    domains_to_remove = []
+
+    # Display domains in multi-columns for better UI
+    domain_cols = st.columns(3)
+    for i, domain in enumerate(st.session_state.search_domains):
+        col_idx = i % 3
+        with domain_cols[col_idx]:
+            if st.checkbox(domain, value=True, key=f"domain_{domain}"):
+                pass  # Keep domain if checked
+            else:
+                domains_to_remove.append(domain)
+
+    # Remove unchecked domains
+    for domain in domains_to_remove:
+        if domain in st.session_state.search_domains:
+            st.session_state.search_domains.remove(domain)
+
+    # Reset to defaults button
+    if st.button("Reset to Default Domains"):
+        st.session_state.search_domains = default_domains.copy()
+        st.experimental_rerun()
+
+    # NEW FEATURE: Price Calculation Objective
+    st.subheader("Price Calculation Objective")
+
+    price_calculation_options = {
+        "none": "No special calculation (standard price)",
+        "unit": "Price per unit (e.g., per item)",
+        "kg": "Price per kilogram",
+        "liter": "Price per liter",
+        "package": "Price per package"
+    }
+
+    price_calc_objective = st.selectbox(
+        "Select how you want prices to be calculated:",
+        options=list(price_calculation_options.keys()),
+        format_func=lambda x: price_calculation_options[x]
+    )
+
+    # Additional input for custom calculation if needed
+    custom_calc_unit = None
+    if price_calc_objective != "none":
+        st.info(f"Products will be evaluated based on {price_calculation_options[price_calc_objective]}")
+
+        if price_calc_objective == "unit":
+            custom_calc_unit = st.text_input(
+                "Specify unit type (e.g., tablet, pill, piece):",
+                placeholder="Leave empty for generic 'unit'"
+            )
+
 
     # Improved prompt template
-    def generate_prompt(tech_spec):
-        return f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
+    def generate_prompt(tech_spec, price_calc_objective, custom_unit=None):
+        # Base prompt
+        prompt = f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
 {tech_spec}
 
 Follow these guidelines:
-1. Tik Lietuviški puslapiai (išskyrus katalogas.cpo.lt, zuza.lt)
+1. Tik Lietuviški puslapiai
 2. Verify the product is currently available for purchase
 3. Gather accurate pricing in EUR
 4. Evaluate technical specification requirements one by one
+"""
 
+        # Add price calculation objective if selected
+        if price_calc_objective != "none":
+            if price_calc_objective == "unit":
+                unit_type = custom_unit if custom_unit else "unit"
+                prompt += f"\n5. Calculate and include price per {unit_type} for each product"
+            elif price_calc_objective == "kg":
+                prompt += "\n5. Calculate and include price per kilogram for each product"
+            elif price_calc_objective == "liter":
+                prompt += "\n5. Calculate and include price per liter for each product"
+            elif price_calc_objective == "package":
+                prompt += "\n5. Calculate and include price per package for each product"
+
+        # JSON format instructions
+        prompt += """
+
+Results should be evaluated from all given domains.
 IMPORTANT: Your response MUST be formatted EXACTLY as a valid JSON array of product objects.
 Each product in the array should have the following fields:
 
 [
-  {{
+  {
     "provider": "Company selling the product",
     "provider_website": "Main website domain (e.g., telia.lt)",
     "provider_url": "Full URL to the specific product page",
     "product_name": "Complete product name with model",
-    "product_properties": {{
+    "product_properties": {
       "key_spec1": "value1",
       "key_spec2": "value2"
-    }},
+    },
     "product_sku": "Any product identifiers (SKU, UPC, model number)",
-    "product_price": 299.99,
+    "product_price": 299.99,"""
+
+        # Add price calculation field based on objective
+        if price_calc_objective != "none":
+            if price_calc_objective == "unit":
+                unit_type = custom_unit if custom_unit else "unit"
+                prompt += f"""
+    "price_per_{price_calc_objective}": 9.99,
+    "unit_type": "{unit_type}","""
+            else:
+                prompt += f"""
+    "price_per_{price_calc_objective}": 9.99,"""
+
+        # Complete the prompt
+        prompt += """
     "evaluation": "Detailed assessment of how the product meets or fails each technical specification"
-  }}
+  }
 ]
 
 DO NOT include any explanation, preamble, or additional text - ONLY provide the JSON array.
+try to present at least 5 products
 """
+        return prompt
 
 
     # Function to query Perplexity API
-    def query_perplexity(prompt, api_key):
+    def query_perplexity(prompt, api_key, search_domains):
         url = "https://api.perplexity.ai/chat/completions"
-
+        st.write(search_domains)
         payload = {
             "model": "sonar-pro",
-            "search_domain_filter": [
-                "vaistai.lt",
-                "kainos.lt",
-                "kaina24.lt",
-                "gintarine.lt",
-                "eurovaistine.lt",
-                "manovaistine.lt",
-                # "-zuza.lt",
-                # "-katalogas.cpo.lt"
-            ],
+            "search_domain_filter": search_domains,
+            "web_search_options": {
+                "search_context_size": "high"
+            },
             "messages": [
                 {
                     "role": "system",
@@ -129,7 +239,7 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
 
     # Function to parse and display results
-    def display_results(response_data):
+    def display_results(response_data, price_calc_objective):
         if "error" in response_data:
             st.error(f"Error: {response_data['error']}")
             return
@@ -179,14 +289,32 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
             history_entry = {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "tech_spec": tech_spec,
+                "price_calc_objective": price_calc_objective,
                 "results": products
             }
             st.session_state.search_history.append(history_entry)
 
             # Display results in expandable sections
             for i, product in enumerate(products):
-                with st.expander(
-                        f"{i + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"):
+                product_title = f"{i + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"
+
+                # Add price calculation to title if available
+                if price_calc_objective != "none":
+                    price_per_key = f"price_per_{price_calc_objective}"
+                    if price_per_key in product:
+                        unit_display = ""
+                        if price_calc_objective == "unit" and "unit_type" in product:
+                            unit_display = f"/{product['unit_type']}"
+                        elif price_calc_objective == "kg":
+                            unit_display = "/kg"
+                        elif price_calc_objective == "liter":
+                            unit_display = "/L"
+                        elif price_calc_objective == "package":
+                            unit_display = "/pkg"
+
+                        product_title += f" (€{product.get(price_per_key, 'N/A')}{unit_display})"
+
+                with st.expander(product_title):
                     col1, col2 = st.columns([1, 2])
 
                     with col1:
@@ -196,6 +324,23 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
                             st.markdown(f"**Product Link:** [View Product]({product['provider_url']})")
                         st.markdown(f"**SKU/ID:** {product.get('product_sku', 'N/A')}")
                         st.markdown(f"**Price:** €{product.get('product_price', 'N/A')}")
+
+                        # Display price calculation if available
+                        if price_calc_objective != "none":
+                            price_per_key = f"price_per_{price_calc_objective}"
+                            if price_per_key in product:
+                                unit_display = ""
+                                if price_calc_objective == "unit" and "unit_type" in product:
+                                    unit_display = f"/{product['unit_type']}"
+                                elif price_calc_objective == "kg":
+                                    unit_display = "/kg"
+                                elif price_calc_objective == "liter":
+                                    unit_display = "/L"
+                                elif price_calc_objective == "package":
+                                    unit_display = "/pkg"
+
+                                st.markdown(
+                                    f"**Price per {price_calc_objective.capitalize()}:** €{product.get(price_per_key, 'N/A')}{unit_display}")
 
                     with col2:
                         st.subheader("Product Properties")
@@ -271,17 +416,26 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
     # Search button
     if st.button("Search Products", type="primary", disabled=not tech_spec):
         with st.spinner("Analyzing Lithuanian market products... (this may take 30-60 seconds)"):
-            prompt = generate_prompt(tech_spec)
+            # Generate prompt with price calculation objective
+            prompt = generate_prompt(tech_spec, price_calc_objective, custom_calc_unit)
 
             # Show prompt in expandable section
             with st.expander("View Search Prompt"):
                 st.text(prompt)
 
-            # Query the API
-            response = query_perplexity(prompt, PERPLEXITY_API_KEY)
+            # Get active search domains
+            active_domains = [domain for domain in st.session_state.search_domains
+                              if st.session_state.get(f"domain_{domain}", True)]
 
-            # Display results
-            display_results(response)
+            if not active_domains:
+                st.warning("No search domains selected. Using default domains.")
+                active_domains = default_domains
+
+            # Query the API with selected domains
+            response = query_perplexity(prompt, PERPLEXITY_API_KEY, active_domains)
+
+            # Display results with price calculation info
+            display_results(response, price_calc_objective)
 
 with tab2:
     st.header("Search History")
@@ -290,14 +444,42 @@ with tab2:
         st.info("No search history yet. Search for products to see your history here.")
     else:
         for i, entry in enumerate(reversed(st.session_state.search_history)):
-            with st.expander(f"{entry['timestamp']} - {entry['tech_spec'][:50]}..."):
+            # Add price calculation info to history entry title
+            price_calc_info = ""
+            if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
+                price_calc_info = f" (Price per {entry['price_calc_objective']})"
+
+            with st.expander(f"{entry['timestamp']} - {entry['tech_spec'][:50]}...{price_calc_info}"):
                 st.markdown(f"**Search Query:**\n{entry['tech_spec']}")
+
+                # Show price calculation objective if available
+                if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
+                    st.markdown(f"**Price Calculation:** Price per {entry['price_calc_objective']}")
+
                 st.markdown(f"**Results:** {len(entry['results'])} products found")
 
                 # Display results again
                 for j, product in enumerate(entry['results']):
-                    st.markdown(
-                        f"**{j + 1}. {product.get('product_name', 'Unknown Product')}** - €{product.get('product_price', 'N/A')}")
+                    # Basic product info
+                    product_info = f"**{j + 1}. {product.get('product_name', 'Unknown Product')}** - €{product.get('product_price', 'N/A')}"
+
+                    # Add price calculation if available
+                    if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
+                        price_per_key = f"price_per_{entry['price_calc_objective']}"
+                        if price_per_key in product:
+                            unit_display = ""
+                            if entry["price_calc_objective"] == "unit" and "unit_type" in product:
+                                unit_display = f"/{product['unit_type']}"
+                            elif entry["price_calc_objective"] == "kg":
+                                unit_display = "/kg"
+                            elif entry["price_calc_objective"] == "liter":
+                                unit_display = "/L"
+                            elif entry["price_calc_objective"] == "package":
+                                unit_display = "/pkg"
+
+                            product_info += f" (€{product.get(price_per_key, 'N/A')}{unit_display})"
+
+                    st.markdown(product_info)
                     st.markdown(
                         f"Provider: {product.get('provider', 'N/A')} | [View Product]({product.get('provider_url', '#')})")
 
@@ -305,8 +487,25 @@ with tab2:
                 if st.button(f"View Full Details #{i}", key=f"history_{i}"):
                     # This recreates the detailed view from the Search tab
                     for j, product in enumerate(entry['results']):
-                        with st.expander(
-                                f"{j + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"):
+                        # Create product title with price calculation if available
+                        product_title = f"{j + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"
+
+                        if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
+                            price_per_key = f"price_per_{entry['price_calc_objective']}"
+                            if price_per_key in product:
+                                unit_display = ""
+                                if entry["price_calc_objective"] == "unit" and "unit_type" in product:
+                                    unit_display = f"/{product['unit_type']}"
+                                elif entry["price_calc_objective"] == "kg":
+                                    unit_display = "/kg"
+                                elif entry["price_calc_objective"] == "liter":
+                                    unit_display = "/L"
+                                elif entry["price_calc_objective"] == "package":
+                                    unit_display = "/pkg"
+
+                                product_title += f" (€{product.get(price_per_key, 'N/A')}{unit_display})"
+
+                        with st.expander(product_title):
                             col1, col2 = st.columns([1, 2])
 
                             with col1:
@@ -316,6 +515,23 @@ with tab2:
                                     st.markdown(f"**Product Link:** [View Product]({product['provider_url']})")
                                 st.markdown(f"**SKU/ID:** {product.get('product_sku', 'N/A')}")
                                 st.markdown(f"**Price:** €{product.get('product_price', 'N/A')}")
+
+                                # Display price calculation if available
+                                if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
+                                    price_per_key = f"price_per_{entry['price_calc_objective']}"
+                                    if price_per_key in product:
+                                        unit_display = ""
+                                        if entry["price_calc_objective"] == "unit" and "unit_type" in product:
+                                            unit_display = f"/{product['unit_type']}"
+                                        elif entry["price_calc_objective"] == "kg":
+                                            unit_display = "/kg"
+                                        elif entry["price_calc_objective"] == "liter":
+                                            unit_display = "/L"
+                                        elif entry["price_calc_objective"] == "package":
+                                            unit_display = "/pkg"
+
+                                        st.markdown(
+                                            f"**Price per {entry['price_calc_objective'].capitalize()}:** €{product.get(price_per_key, 'N/A')}{unit_display}")
 
                             with col2:
                                 st.subheader("Product Properties")
@@ -343,9 +559,12 @@ with tab3:
     ### How to Use
 
     1. Enter the technical specifications for the product you're looking for
-    2. Click "Search Products"
-    3. Review the results, which show:
-       - Product details and pricing
+    2. Configure search domains to include or exclude specific websites
+    3. Select a price calculation objective if you want to compare prices on a specific basis
+    4. Click "Search Products"
+    5. Review the results, which show:
+       - Product details and standard pricing
+       - Price calculations based on your selected objective (per kg, per unit, etc.)
        - Technical specifications evaluation
        - Links to product pages
 
@@ -355,6 +574,7 @@ with tab3:
     - Include both must-have and nice-to-have features
     - Specify brand preferences if you have any
     - Include price range if relevant
+    - Use the price calculation objectives for better comparison between products (e.g., price per kg for groceries)
 
     ### Technical Details
 
@@ -362,13 +582,14 @@ with tab3:
     - Streamlit for the web interface
     - Perplexity AI API for intelligent market research
     - JSON for structured data handling
+    - Custom domains configuration for targeted searches
+    - Specialized price calculations for better product comparison
 
     ### Privacy Note
 
     Your search queries and technical specifications are sent to the Perplexity API
     to generate results. No personal information is stored or shared beyond what is 
     necessary for the application to function.
-    try to present at least 5 products
     """)
 
 # Footer
