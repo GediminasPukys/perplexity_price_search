@@ -42,6 +42,13 @@ tab1, tab2, tab3 = st.tabs(["Product Search", "Search History", "About"])
 with tab1:
     st.header("Search for Products")
 
+    # Product category input
+    st.subheader("Product Category/Group")
+    product_category = st.text_input(
+        "Enter the product category or group:",
+        placeholder="Example: Smartphones, Laptops, Vitamins, Sports shoes, Furniture"
+    )
+
     # Technical specification input
     st.subheader("Enter Technical Specification")
     tech_spec = st.text_area(
@@ -50,23 +57,86 @@ with tab1:
         placeholder="Example: Smartphone with at least 6GB RAM, 128GB storage, 6.1 inch OLED display, 5G connectivity, IP68 water resistance"
     )
 
+
+    # Function to discover top Lithuanian domains for a product category
+    def discover_lithuanian_domains(category, api_key):
+        client = OpenAI(api_key=api_key)
+
+        prompt = f"""Find the top 10 Lithuanian e-commerce or retail websites that would sell products in the category: "{category}".
+
+        These should be legitimate, well-known Lithuanian websites (domains ending with .lt).
+        Focus on websites that are popular in Lithuania and specialize in or have a good selection of {category}.
+        Return ONLY the domain names (e.g., "varle.lt") in a JSON array format like this:
+
+        ["domain1.lt", "domain2.lt", "domain3.lt", ...]
+
+        DO NOT include any explanation, preamble, or additional text - ONLY provide the JSON array of domain names.
+        """
+
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                response_format={"type": "json_object"}
+            )
+
+            response_content = completion.choices[0].message.content
+            domains_data = json.loads(response_content)
+
+            # Check if we have a domains key or if the response is directly the array
+            if isinstance(domains_data, dict) and "domains" in domains_data:
+                return domains_data["domains"]
+            elif isinstance(domains_data, list):
+                return domains_data
+            else:
+                # Try to find any list in the response
+                for key, value in domains_data.items():
+                    if isinstance(value, list):
+                        return value
+
+                # If all else fails, return an empty list
+                return []
+
+        except Exception as e:
+            st.error(f"Error discovering domains: {str(e)}")
+            return []
+
+
     # NEW FEATURE: Search Domains Configuration
     st.subheader("Search Domains Configuration")
 
-    # Default search domains
-    default_domains = [
-        "vaistai.lt",
-        "kainos.lt",
-        "kaina24.lt",
-        "gintarine.lt",
-        "eurovaistine.lt",
-        "manovaistine.lt",
-        "senukai.lt"
-    ]
+    # Default search domains - now dynamically populated
+    if "search_domains" not in st.session_state or st.session_state.get("last_category") != product_category:
+        if product_category:
+            with st.spinner("Discovering top Lithuanian domains for this product category..."):
+                discovered_domains = discover_lithuanian_domains(product_category, OPENAI_API_KEY)
 
-    # Initialize session state for domains if not already set
-    if "search_domains" not in st.session_state:
-        st.session_state.search_domains = default_domains.copy()
+                if discovered_domains:
+                    st.session_state.search_domains = discovered_domains
+                    st.session_state.last_category = product_category
+                    st.success(f"Found {len(discovered_domains)} relevant Lithuanian domains for {product_category}")
+                else:
+                    # Fallback domains if discovery fails
+                    fallback_domains = [
+                        "varle.lt",
+                        "pigu.lt",
+                        "senukai.lt",
+                        "kainos.lt",
+                        "rde.lt",
+                        "topocentras.lt",
+                        "1a.lt"
+                    ]
+                    st.session_state.search_domains = fallback_domains
+                    st.warning("Could not discover specific domains. Using general Lithuanian e-commerce sites.")
+        else:
+            # Initial state - empty list until category is provided
+            st.session_state.search_domains = []
+            st.info("Enter a product category above to discover relevant Lithuanian websites.")
 
     # Input for adding new domain
     col1, col2 = st.columns([3, 1])
@@ -75,6 +145,9 @@ with tab1:
                                    placeholder="Enter a Lithuanian domain")
     with col2:
         if st.button("Add Domain") and new_domain:
+            if "search_domains" not in st.session_state:
+                st.session_state.search_domains = []
+
             if new_domain not in st.session_state.search_domains:
                 st.session_state.search_domains.append(new_domain)
                 st.success(f"Added {new_domain} to search domains")
@@ -82,28 +155,33 @@ with tab1:
                 st.info(f"{new_domain} is already in search domains")
 
     # Display and manage current domains
-    st.write("Current search domains:")
-    domains_to_remove = []
+    if "search_domains" in st.session_state and st.session_state.search_domains:
+        st.write("Current search domains:")
+        domains_to_remove = []
 
-    # Display domains in multi-columns for better UI
-    domain_cols = st.columns(3)
-    for i, domain in enumerate(st.session_state.search_domains):
-        col_idx = i % 3
-        with domain_cols[col_idx]:
-            if st.checkbox(domain, value=True, key=f"domain_{domain}"):
-                pass  # Keep domain if checked
-            else:
-                domains_to_remove.append(domain)
+        # Display domains in multi-columns for better UI
+        domain_cols = st.columns(3)
+        for i, domain in enumerate(st.session_state.search_domains):
+            col_idx = i % 3
+            with domain_cols[col_idx]:
+                if st.checkbox(domain, value=True, key=f"domain_{domain}"):
+                    pass  # Keep domain if checked
+                else:
+                    domains_to_remove.append(domain)
 
-    # Remove unchecked domains
-    for domain in domains_to_remove:
-        if domain in st.session_state.search_domains:
-            st.session_state.search_domains.remove(domain)
+        # Remove unchecked domains
+        for domain in domains_to_remove:
+            if domain in st.session_state.search_domains:
+                st.session_state.search_domains.remove(domain)
 
-    # Reset to defaults button
-    if st.button("Reset to Default Domains"):
-        st.session_state.search_domains = default_domains.copy()
-        st.experimental_rerun()
+        # Refresh domains button
+        if st.button("Refresh Domains for This Category"):
+            if product_category:
+                del st.session_state.search_domains
+                del st.session_state.last_category
+                st.experimental_rerun()
+    else:
+        st.info("No search domains yet. Enter a product category to discover relevant domains.")
 
     # NEW FEATURE: Price Calculation Objective
     st.subheader("Price Calculation Objective")
@@ -135,10 +213,10 @@ with tab1:
 
 
     # Function to generate initial URL retrieval prompt
-    def generate_url_retrieval_prompt(tech_spec, search_domains):
+    def generate_url_retrieval_prompt(category, tech_spec, search_domains):
         domains_list = "\n".join([f"        {i}:\"{domain}\"" for i, domain in enumerate(search_domains)])
 
-        prompt = f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
+        prompt = f"""Analyze the Lithuanian market for {category} and gather detailed product information according to the following technical specification:
 {tech_spec}
 
 You must search in the following domains:
@@ -150,9 +228,9 @@ You must search in the following domains:
 
 
     # Function to generate detailed analysis prompt for each URL
-    def generate_url_analysis_prompt(tech_spec, url, price_calc_objective, custom_unit=None):
+    def generate_url_analysis_prompt(category, tech_spec, url, price_calc_objective, custom_unit=None):
         # Base prompt
-        prompt = f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
+        prompt = f"""Analyze the Lithuanian market for {category} and gather detailed product information according to the following technical specification:
 {tech_spec}
 You must search the following URL: {url}
 
@@ -276,13 +354,13 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
 
     # Function to parse and display results
-    def display_results(all_products, price_calc_objective):
+    def display_results(all_products, category, price_calc_objective):
         if not all_products:
             st.error("No products found or error occurred during analysis.")
             return
 
         # Display the products
-        st.subheader(f"Found {len(all_products)} Products")
+        st.subheader(f"Found {len(all_products)} Products in {category} category")
 
         # Save to session state history
         if "search_history" not in st.session_state:
@@ -290,6 +368,7 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
         history_entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "category": category,
             "tech_spec": tech_spec,
             "price_calc_objective": price_calc_objective,
             "results": all_products
@@ -363,18 +442,27 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
 
     # Search button
-    if st.button("Search Products", type="primary", disabled=not tech_spec):
-        with st.spinner("Analyzing Lithuanian market products... (this may take 1-2 minutes)"):
+    if st.button("Search Products", type="primary", disabled=not (tech_spec and product_category)):
+        # Warn if no category is provided
+        if not product_category:
+            st.warning("Please enter a product category to continue.")
+            st.stop()
+
+        with st.spinner(f"Analyzing Lithuanian market for {product_category}... (this may take 1-2 minutes)"):
             # Get active search domains
+            if "search_domains" not in st.session_state or not st.session_state.search_domains:
+                st.warning("No search domains available. Please enter a product category first.")
+                st.stop()
+
             active_domains = [domain for domain in st.session_state.search_domains
                               if st.session_state.get(f"domain_{domain}", True)]
 
             if not active_domains:
-                st.warning("No search domains selected. Using default domains.")
-                active_domains = default_domains
+                st.warning("No search domains selected. Please select at least one domain.")
+                st.stop()
 
             # LAYER 1: Generate prompt for URL retrieval
-            url_retrieval_prompt = generate_url_retrieval_prompt(tech_spec, active_domains)
+            url_retrieval_prompt = generate_url_retrieval_prompt(product_category, tech_spec, active_domains)
 
             # Show prompt in expandable section
             with st.expander("View URL Retrieval Prompt"):
@@ -404,6 +492,7 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
                 # Generate analysis prompt for this URL
                 analysis_prompt = generate_url_analysis_prompt(
+                    product_category,
                     tech_spec,
                     url_data['url'],
                     price_calc_objective,
@@ -452,7 +541,7 @@ DO NOT include any explanation, preamble, or additional text - ONLY provide the 
 
             # Display all results
             if all_products:
-                display_results(all_products, price_calc_objective)
+                display_results(all_products, product_category, price_calc_objective)
             else:
                 st.error("No products found matching your specifications.")
 
@@ -463,12 +552,14 @@ with tab2:
         st.info("No search history yet. Search for products to see your history here.")
     else:
         for i, entry in enumerate(reversed(st.session_state.search_history)):
-            # Add price calculation info to history entry title
+            # Add category and price calculation info to history entry title
+            category_info = f"[{entry.get('category', 'Unknown')}]"
             price_calc_info = ""
             if "price_calc_objective" in entry and entry["price_calc_objective"] != "none":
                 price_calc_info = f" (Price per {entry['price_calc_objective']})"
 
-            with st.expander(f"{entry['timestamp']} - {entry['tech_spec'][:50]}...{price_calc_info}"):
+            with st.expander(f"{entry['timestamp']} - {category_info} {entry['tech_spec'][:50]}...{price_calc_info}"):
+                st.markdown(f"**Category:** {entry.get('category', 'None')}")
                 st.markdown(f"**Search Query:**\n{entry['tech_spec']}")
 
                 # Show price calculation objective if available
@@ -577,11 +668,13 @@ with tab3:
 
     ### How to Use
 
-    1. Enter the technical specifications for the product you're looking for
-    2. Configure search domains to include or exclude specific websites
-    3. Select a price calculation objective if you want to compare prices on a specific basis
-    4. Click "Search Products"
-    5. Review the results, which show:
+    1. Enter the product category or group (e.g., Smartphones, Vitamins, Sports equipment)
+    2. Enter the technical specifications for the product you're looking for
+    3. The app will automatically discover relevant Lithuanian websites for your product category
+    4. Customize search domains if needed
+    5. Select a price calculation objective if you want to compare prices on a specific basis
+    6. Click "Search Products"
+    7. Review the results, which show:
        - Product details and standard pricing
        - Price calculations based on your selected objective (per kg, per unit, etc.)
        - Technical specifications evaluation
@@ -589,8 +682,8 @@ with tab3:
 
     ### Tips for Best Results
 
-    - Be specific about your requirements
-    - Include both must-have and nice-to-have features
+    - Be specific with your product category (e.g., "Gaming laptops" instead of just "Computers")
+    - Include both must-have and nice-to-have features in your specifications
     - Specify brand preferences if you have any
     - Include price range if relevant
     - Use the price calculation objectives for better comparison between products (e.g., price per kg for groceries)
@@ -600,6 +693,7 @@ with tab3:
     This application uses:
     - Streamlit for the web interface
     - OpenAI API with GPT-4o Search for intelligent market research
+    - Dynamic domain discovery based on product category
     - Two-layer search approach:
       1. First finds relevant URLs
       2. Then analyzes each URL for detailed product information
