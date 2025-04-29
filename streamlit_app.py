@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import json
 import time
+from openai import OpenAI
 
 # Page configuration
 st.set_page_config(
@@ -14,18 +15,18 @@ st.set_page_config(
 st.title("🔍 Lithuanian Market Product Analyzer")
 st.markdown("""
 This application analyzes Lithuanian market products based on a technical specification.
-It queries the Perplexity API to gather structured product information and evaluates each product.
+It queries the OpenAI API to gather structured product information and evaluates each product.
 """)
 
 # Check if API key is configured
-if 'perplexity_api_key' not in st.secrets.get("config", {}):
+if 'openai_api_key' not in st.secrets.get("config", {}):
     st.error("""
-    ⚠️ Perplexity API key not found in secrets.
+    ⚠️ OpenAI API key not found in secrets.
 
-    1. Create a `.streamlit/secrets.toml` file with your Perplexity API key:
+    1. Create a `.streamlit/secrets.toml` file with your OpenAI API key:
     ```
     [config]
-    perplexity_api_key = "your_perplexity_api_key"
+    openai_api_key = "your_openai_api_key"
     ```
 
     2. Restart the application.
@@ -33,7 +34,7 @@ if 'perplexity_api_key' not in st.secrets.get("config", {}):
     st.stop()
 
 # Get the API key from secrets
-PERPLEXITY_API_KEY = st.secrets["config"]["perplexity_api_key"]
+OPENAI_API_KEY = st.secrets["config"]["openai_api_key"]
 
 # Create tabs for different sections
 tab1, tab2, tab3 = st.tabs(["Product Search", "Search History", "About"])
@@ -59,7 +60,8 @@ with tab1:
         "kaina24.lt",
         "gintarine.lt",
         "eurovaistine.lt",
-        "manovaistine.lt"
+        "manovaistine.lt",
+        "senukai.lt"
     ]
 
     # Initialize session state for domains if not already set
@@ -132,14 +134,28 @@ with tab1:
             )
 
 
-    # Improved prompt template
-    def generate_prompt(tech_spec, price_calc_objective, custom_unit=None):
-        # Base prompt
+    # Function to generate initial URL retrieval prompt
+    def generate_url_retrieval_prompt(tech_spec, search_domains):
+        domains_list = "\n".join([f"        {i}:\"{domain}\"" for i, domain in enumerate(search_domains)])
+
         prompt = f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
 {tech_spec}
 
-Follow these guidelines:
-1. Tik Lietuviški puslapiai
+You must search in the following domains:
+    [
+{domains_list}
+    ]
+"""
+        return prompt
+
+
+    # Function to generate detailed analysis prompt for each URL
+    def generate_url_analysis_prompt(tech_spec, url, price_calc_objective, custom_unit=None):
+        # Base prompt
+        prompt = f"""Analyze the Lithuanian market and gather detailed product information according to the following technical specification:
+{tech_spec}
+You must search the following URL: {url}
+
 2. Verify the product is currently available for purchase
 3. Gather accurate pricing in EUR
 4. Evaluate technical specification requirements one by one
@@ -195,234 +211,160 @@ Each product in the array should have the following fields:
 ]
 
 DO NOT include any explanation, preamble, or additional text - ONLY provide the JSON array.
-try to present at least 5 products
 """
         return prompt
 
 
-    # Function to query Perplexity API
-    def query_perplexity(prompt, api_key, search_domains):
-        url = "https://api.perplexity.ai/chat/completions"
-        st.write(search_domains)
-        payload = {
-            "model": "sonar-pro",
-            "search_domain_filter": search_domains,
-            "web_search_options": {
-                "search_context_size": "high"
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful AI assistant specialized in Lithuanian market product analysis. Your responses should be accurate, structured as requested, and focused on product information available in Lithuania. Always format product data as proper JSON."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.2
-            # Removed the response_format parameter which was causing the error
-        }
+    # Function to query OpenAI API for URL retrieval
+    def query_openai_for_urls(prompt, api_key):
+        client = OpenAI(api_key=api_key)
 
-        headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "authorization": f"Bearer {api_key}"
-        }
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-search-preview",
+                web_search_options={},
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+            )
 
-        response = requests.post(url, json=payload, headers=headers)
+            # Extract URLs from annotations
+            urls = []
+            if hasattr(completion.choices[0].message, 'annotations'):
+                for annotation in completion.choices[0].message.annotations:
+                    if hasattr(annotation, 'url_citation'):
+                        url_data = annotation.url_citation.model_dump()
+                        urls.append({
+                            "title": url_data.get("title", "No title"),
+                            "url": url_data.get("url", "")
+                        })
 
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return {"error": f"API request failed with status code {response.status_code}: {response.text}"}
+            return {
+                "content": completion.choices[0].message.content,
+                "urls": urls
+            }
+
+        except Exception as e:
+            return {"error": f"API request failed: {str(e)}"}
+
+
+    # Function to query OpenAI API for detailed product analysis
+    def query_openai_for_product_details(prompt, api_key):
+        client = OpenAI(api_key=api_key)
+
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o-search-preview",
+                web_search_options={},
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+            )
+
+            return {
+                "content": completion.choices[0].message.content
+            }
+
+        except Exception as e:
+            return {"error": f"API request failed: {str(e)}"}
 
 
     # Function to parse and display results
-    def display_results(response_data, price_calc_objective):
-        if "error" in response_data:
-            st.error(f"Error: {response_data['error']}")
+    def display_results(all_products, price_calc_objective):
+        if not all_products:
+            st.error("No products found or error occurred during analysis.")
             return
 
-        try:
-            # Extract the content from the Perplexity response
-            content = response_data["choices"][0]["message"]["content"]
+        # Display the products
+        st.subheader(f"Found {len(all_products)} Products")
 
-            # Display raw response for debugging
-            with st.expander("View Raw API Response"):
-                st.text(content)
+        # Save to session state history
+        if "search_history" not in st.session_state:
+            st.session_state.search_history = []
 
-            # Extract JSON from the response
-            # Try to find JSON within the text (in case it's wrapped in text)
-            import re
-            json_match = re.search(r'(\[\s*{.*}\s*\]|\{\s*"products"\s*:\s*\[.*\]\s*\})', content, re.DOTALL)
+        history_entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tech_spec": tech_spec,
+            "price_calc_objective": price_calc_objective,
+            "results": all_products
+        }
+        st.session_state.search_history.append(history_entry)
 
-            if json_match:
-                json_str = json_match.group(0)
-                try:
-                    products_data = json.loads(json_str)
-                except:
-                    # If that fails, try to parse the entire content
-                    products_data = json.loads(content)
-            else:
-                # If no JSON pattern found, try parsing the entire content
-                products_data = json.loads(content)
+        # Display results in expandable sections
+        for i, product in enumerate(all_products):
+            product_title = f"{i + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"
 
-            # Check if the response is directly a list or if it contains a 'products' key
-            if isinstance(products_data, dict) and "products" in products_data:
-                products = products_data["products"]
-            else:
-                products = products_data
+            # Add price calculation to title if available
+            if price_calc_objective != "none":
+                price_per_key = f"price_per_{price_calc_objective}"
+                if price_per_key in product:
+                    unit_display = ""
+                    if price_calc_objective == "unit" and "unit_type" in product:
+                        unit_display = f"/{product['unit_type']}"
+                    elif price_calc_objective == "kg":
+                        unit_display = "/kg"
+                    elif price_calc_objective == "liter":
+                        unit_display = "/L"
+                    elif price_calc_objective == "package":
+                        unit_display = "/pkg"
 
-            if not isinstance(products, list):
-                st.error("The response format is not as expected. Please try again.")
-                st.json(products_data)
-                return
+                    product_title += f" (€{product.get(price_per_key, 'N/A')}{unit_display})"
 
-            # Display the products
-            st.subheader(f"Found {len(products)} Products")
+            with st.expander(product_title):
+                col1, col2 = st.columns([1, 2])
 
-            # Save to session state history
-            if "search_history" not in st.session_state:
-                st.session_state.search_history = []
+                with col1:
+                    st.markdown(f"**Provider:** {product.get('provider', 'N/A')}")
+                    st.markdown(f"**Website:** {product.get('provider_website', 'N/A')}")
+                    if 'provider_url' in product and product['provider_url']:
+                        st.markdown(f"**Product Link:** [View Product]({product['provider_url']})")
+                    st.markdown(f"**SKU/ID:** {product.get('product_sku', 'N/A')}")
+                    st.markdown(f"**Price:** €{product.get('product_price', 'N/A')}")
 
-            history_entry = {
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "tech_spec": tech_spec,
-                "price_calc_objective": price_calc_objective,
-                "results": products
-            }
-            st.session_state.search_history.append(history_entry)
+                    # Display price calculation if available
+                    if price_calc_objective != "none":
+                        price_per_key = f"price_per_{price_calc_objective}"
+                        if price_per_key in product:
+                            unit_display = ""
+                            if price_calc_objective == "unit" and "unit_type" in product:
+                                unit_display = f"/{product['unit_type']}"
+                            elif price_calc_objective == "kg":
+                                unit_display = "/kg"
+                            elif price_calc_objective == "liter":
+                                unit_display = "/L"
+                            elif price_calc_objective == "package":
+                                unit_display = "/pkg"
 
-            # Display results in expandable sections
-            for i, product in enumerate(products):
-                product_title = f"{i + 1}. {product.get('product_name', 'Unknown Product')} - €{product.get('product_price', 'N/A')}"
+                            st.markdown(
+                                f"**Price per {price_calc_objective.capitalize()}:** €{product.get(price_per_key, 'N/A')}{unit_display}")
 
-                # Add price calculation to title if available
-                if price_calc_objective != "none":
-                    price_per_key = f"price_per_{price_calc_objective}"
-                    if price_per_key in product:
-                        unit_display = ""
-                        if price_calc_objective == "unit" and "unit_type" in product:
-                            unit_display = f"/{product['unit_type']}"
-                        elif price_calc_objective == "kg":
-                            unit_display = "/kg"
-                        elif price_calc_objective == "liter":
-                            unit_display = "/L"
-                        elif price_calc_objective == "package":
-                            unit_display = "/pkg"
-
-                        product_title += f" (€{product.get(price_per_key, 'N/A')}{unit_display})"
-
-                with st.expander(product_title):
-                    col1, col2 = st.columns([1, 2])
-
-                    with col1:
-                        st.markdown(f"**Provider:** {product.get('provider', 'N/A')}")
-                        st.markdown(f"**Website:** {product.get('provider_website', 'N/A')}")
-                        if 'provider_url' in product and product['provider_url']:
-                            st.markdown(f"**Product Link:** [View Product]({product['provider_url']})")
-                        st.markdown(f"**SKU/ID:** {product.get('product_sku', 'N/A')}")
-                        st.markdown(f"**Price:** €{product.get('product_price', 'N/A')}")
-
-                        # Display price calculation if available
-                        if price_calc_objective != "none":
-                            price_per_key = f"price_per_{price_calc_objective}"
-                            if price_per_key in product:
-                                unit_display = ""
-                                if price_calc_objective == "unit" and "unit_type" in product:
-                                    unit_display = f"/{product['unit_type']}"
-                                elif price_calc_objective == "kg":
-                                    unit_display = "/kg"
-                                elif price_calc_objective == "liter":
-                                    unit_display = "/L"
-                                elif price_calc_objective == "package":
-                                    unit_display = "/pkg"
-
-                                st.markdown(
-                                    f"**Price per {price_calc_objective.capitalize()}:** €{product.get(price_per_key, 'N/A')}{unit_display}")
-
-                    with col2:
-                        st.subheader("Product Properties")
-                        properties = product.get('product_properties', {})
-                        if properties:
-                            for key, value in properties.items():
-                                st.markdown(f"**{key}:** {value}")
-                        else:
-                            st.write("No detailed properties available.")
-
-                        st.subheader("Technical Evaluation")
-                        evaluation = product.get('evaluation', 'No evaluation available.')
-                        st.write(evaluation)
-
-            # Show raw JSON option
-            with st.expander("View Raw JSON Response"):
-                st.json(products)
-
-        except json.JSONDecodeError as json_err:
-            st.error("Failed to parse the JSON response from the API.")
-            st.write("Attempting to extract JSON from the response...")
-
-            # Try to find and extract JSON from text with a more aggressive approach
-            try:
-                import re
-                # Look for anything that might be JSON
-                json_pattern = r'(\[[\s\S]*\]|\{[\s\S]*\})'
-                matches = re.findall(json_pattern, content)
-
-                if matches:
-                    st.write(f"Found {len(matches)} potential JSON structures. Trying to parse them...")
-
-                    for i, match in enumerate(matches):
-                        try:
-                            potential_json = json.loads(match)
-                            st.success(f"Successfully parsed JSON structure #{i + 1}")
-
-                            # If we have a valid JSON structure, try to display it
-                            if isinstance(potential_json, list):
-                                products = potential_json
-                                st.success(f"Found a list of {len(products)} products! Displaying results...")
-                                break
-                            elif isinstance(potential_json, dict) and "products" in potential_json:
-                                products = potential_json["products"]
-                                st.success(f"Found a dictionary with {len(products)} products! Displaying results...")
-                                break
-                        except:
-                            st.write(f"Structure #{i + 1} is not valid JSON.")
-
-                    # If we found and successfully parsed JSON with products
-                    if 'products' in locals() and isinstance(products, list) and len(products) > 0:
-                        # Continue with displaying products
-                        pass
+                with col2:
+                    st.subheader("Product Properties")
+                    properties = product.get('product_properties', {})
+                    if properties:
+                        for key, value in properties.items():
+                            st.markdown(f"**{key}:** {value}")
                     else:
-                        # No valid JSON product list found
-                        st.error("Could not extract a valid product list from the response.")
-                        st.text("Raw content:")
-                        st.text(content)
-                else:
-                    st.error("No JSON-like structures found in the response.")
-                    st.text("Raw content:")
-                    st.text(content)
-            except Exception as extract_err:
-                st.error(f"Error while trying to extract JSON: {str(extract_err)}")
-                st.text("Raw content:")
-                st.text(content)
-        except Exception as e:
-            st.error(f"An error occurred while processing the results: {str(e)}")
-            st.text("Response data:")
-            st.write(response_data)
+                        st.write("No detailed properties available.")
+
+                    st.subheader("Technical Evaluation")
+                    evaluation = product.get('evaluation', 'No evaluation available.')
+                    st.write(evaluation)
+
+        # Show raw JSON option
+        with st.expander("View Raw JSON Response"):
+            st.json(all_products)
 
 
     # Search button
     if st.button("Search Products", type="primary", disabled=not tech_spec):
-        with st.spinner("Analyzing Lithuanian market products... (this may take 30-60 seconds)"):
-            # Generate prompt with price calculation objective
-            prompt = generate_prompt(tech_spec, price_calc_objective, custom_calc_unit)
-
-            # Show prompt in expandable section
-            with st.expander("View Search Prompt"):
-                st.text(prompt)
-
+        with st.spinner("Analyzing Lithuanian market products... (this may take 1-2 minutes)"):
             # Get active search domains
             active_domains = [domain for domain in st.session_state.search_domains
                               if st.session_state.get(f"domain_{domain}", True)]
@@ -431,11 +373,88 @@ try to present at least 5 products
                 st.warning("No search domains selected. Using default domains.")
                 active_domains = default_domains
 
-            # Query the API with selected domains
-            response = query_perplexity(prompt, PERPLEXITY_API_KEY, active_domains)
+            # LAYER 1: Generate prompt for URL retrieval
+            url_retrieval_prompt = generate_url_retrieval_prompt(tech_spec, active_domains)
 
-            # Display results with price calculation info
-            display_results(response, price_calc_objective)
+            # Show prompt in expandable section
+            with st.expander("View URL Retrieval Prompt"):
+                st.text(url_retrieval_prompt)
+
+            # Query OpenAI for URLs
+            url_response = query_openai_for_urls(url_retrieval_prompt, OPENAI_API_KEY)
+
+            if "error" in url_response:
+                st.error(f"Error in URL retrieval: {url_response['error']}")
+                st.stop()
+
+            # Display found URLs
+            with st.expander("Found URLs for Analysis"):
+                st.write(f"Found {len(url_response['urls'])} relevant URLs")
+                for i, url_data in enumerate(url_response['urls']):
+                    st.write(f"{i + 1}. [{url_data['title']}]({url_data['url']})")
+
+            # LAYER 2: Analyze each URL for detailed product information
+            all_products = []
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for i, url_data in enumerate(url_response['urls']):
+                status_text.text(f"Analyzing URL {i + 1}/{len(url_response['urls'])}: {url_data['title']}")
+
+                # Generate analysis prompt for this URL
+                analysis_prompt = generate_url_analysis_prompt(
+                    tech_spec,
+                    url_data['url'],
+                    price_calc_objective,
+                    custom_calc_unit
+                )
+
+                # Query OpenAI for detailed product analysis
+                product_response = query_openai_for_product_details(analysis_prompt, OPENAI_API_KEY)
+
+                if "error" not in product_response:
+                    try:
+                        # Try to parse JSON from response
+                        product_content = product_response["content"]
+
+                        # Extract JSON if it's embedded in text
+                        import re
+
+                        json_match = re.search(r'(\[\s*{.*}\s*\]|\{\s*"products"\s*:\s*\[.*\]\s*\})', product_content,
+                                               re.DOTALL)
+
+                        if json_match:
+                            json_str = json_match.group(0)
+                            products_data = json.loads(json_str)
+                        else:
+                            products_data = json.loads(product_content)
+
+                        # Check if the response is a list or contains a 'products' key
+                        if isinstance(products_data, dict) and "products" in products_data:
+                            products = products_data["products"]
+                        else:
+                            products = products_data
+
+                        if isinstance(products, list):
+                            all_products.extend(products)
+
+                    except Exception as e:
+                        st.warning(f"Could not parse products from URL {i + 1}: {str(e)}")
+                else:
+                    st.warning(f"Error analyzing URL {i + 1}: {product_response['error']}")
+
+                # Update progress
+                progress_value = (i + 1) / len(url_response['urls'])
+                progress_bar.progress(progress_value)
+
+            status_text.text("Analysis complete!")
+
+            # Display all results
+            if all_products:
+                display_results(all_products, price_calc_objective)
+            else:
+                st.error("No products found matching your specifications.")
 
 with tab2:
     st.header("Search History")
@@ -553,7 +572,7 @@ with tab3:
     ## Lithuanian Market Product Analyzer
 
     This application helps you find and compare products available in the Lithuanian market
-    based on technical specifications you provide. It leverages the Perplexity API to search
+    based on technical specifications you provide. It leverages the OpenAI API to search
     for and analyze products from various Lithuanian retailers.
 
     ### How to Use
@@ -580,18 +599,25 @@ with tab3:
 
     This application uses:
     - Streamlit for the web interface
-    - Perplexity AI API for intelligent market research
+    - OpenAI API with GPT-4o Search for intelligent market research
+    - Two-layer search approach:
+      1. First finds relevant URLs
+      2. Then analyzes each URL for detailed product information
     - JSON for structured data handling
     - Custom domains configuration for targeted searches
     - Specialized price calculations for better product comparison
 
     ### Privacy Note
 
-    Your search queries and technical specifications are sent to the Perplexity API
+    Your search queries and technical specifications are sent to the OpenAI API
     to generate results. No personal information is stored or shared beyond what is 
     necessary for the application to function.
     """)
 
+# Update the secrets example file to include OpenAI instead of Perplexity
+with open('.streamlit/secrets-example.toml', 'w') as f:
+    f.write('[config]\nopenai_api_key = "my_key"')
+
 # Footer
 st.markdown("---")
-st.markdown("© 2025 Lithuanian Market Product Analyzer | Powered by Perplexity AI")
+st.markdown("© 2025 Lithuanian Market Product Analyzer | Powered by OpenAI API")
