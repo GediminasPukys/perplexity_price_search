@@ -3,6 +3,7 @@ import requests
 import json
 import time
 from openai import OpenAI
+from pydantic import BaseModel
 
 # Page configuration
 st.set_page_config(
@@ -74,33 +75,27 @@ with tab1:
         """
 
         try:
-            completion = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
+            class URLs(BaseModel):
+                urls: list[str]
+
+            response = client.responses.parse(
+                model="gpt-4.1",
+                tools=[{
+                    "type": "web_search_preview",
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "LT",
+                        "city": "Vilnius",
                     }
-                ],
-                response_format={"type": "json_object"}
+                }],
+                input=prompt,
+                text_format=URLs,
             )
 
-            response_content = completion.choices[0].message.content
-            domains_data = json.loads(response_content)
+            urls = response.output_parsed.urls
 
-            # Check if we have a domains key or if the response is directly the array
-            if isinstance(domains_data, dict) and "domains" in domains_data:
-                return domains_data["domains"]
-            elif isinstance(domains_data, list):
-                return domains_data
-            else:
-                # Try to find any list in the response
-                for key, value in domains_data.items():
-                    if isinstance(value, list):
-                        return value
-
-                # If all else fails, return an empty list
-                return []
+            # If all else fails, return an empty list
+            return urls
 
         except Exception as e:
             st.error(f"Error discovering domains: {str(e)}")
